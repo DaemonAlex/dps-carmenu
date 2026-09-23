@@ -18,6 +18,7 @@ lib.callback.register('dps-carmenu:server:spawn', function(source, model)
     if type(model) ~= 'string' or #model > 40 then return false end
 
     local ped = GetPlayerPed(source)
+    local started = GetGameTimer()
     local ok, netId = pcall(function()
         local _, veh = qbx.spawnVehicle({
             model = model,
@@ -26,8 +27,13 @@ lib.callback.register('dps-carmenu:server:spawn', function(source, model)
         })
         return NetworkGetNetworkIdFromEntity(veh)
     end)
-    if not ok or not netId then return false end
+    if not ok or not netId then
+        print(('[dps-carmenu] spawn FAILED for %s (src %s) after %d ms: %s'):format(model, source, GetGameTimer() - started, tostring(netId)))
+        return false
+    end
 
     local veh = NetworkGetEntityFromNetworkId(netId)
-    return true, qbx.getVehiclePlate(veh)
+    local plate = qbx.getVehiclePlate(veh)
+    print(('[dps-carmenu] spawned %s plate %s for src %s in %d ms'):format(model, tostring(plate), source, GetGameTimer() - started))
+    return true, plate
 end)
