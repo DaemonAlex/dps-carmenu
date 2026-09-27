@@ -247,6 +247,16 @@ RegisterNUICallback('delete', function(_, cb)
     cb({ ok = ok })
 end)
 
+-- Workshop: hand the selected vehicle (the one we sit in, else the last spawned) to dps-EVM.
+RegisterNUICallback('workshop', function(req, cb)
+    local veh = liveVehicle(req.model or '')
+    if not veh then cb({ ok = false, reason = 'Spawn it or sit in it first.' }) return end
+    if GetResourceState('dps-EVM') ~= 'started' then cb({ ok = false, reason = 'Workshop (dps-EVM) is not running.' }) return end
+    closePanel()
+    TriggerEvent('vehiclemods:client:openVehicleModMenu', veh)
+    cb({ ok = true })
+end)
+
 AddEventHandler('onResourceStop', function(res)
     if res == GetCurrentResourceName() then SetNuiFocus(false, false) end
 end)

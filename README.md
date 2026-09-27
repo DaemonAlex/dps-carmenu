@@ -21,7 +21,7 @@ server restart with no changes to this resource.
 - **Spawn** replaces the vehicle you are in (same spot and heading, you stay in the seat, keys via
   wasabi_carlock when present) or, with **Spawn beside** / `Shift+Enter`, puts it next to you.
 - **Copy card** puts a plain-text `DPS VEHICLE CARD` on the clipboard; **Copy handling** copies every
-  handling field in `handling.meta` order. **Remove mine** deletes the vehicle you sit in or last spawned.
+  handling field in `handling.meta` order. **Remove mine** deletes the vehicle you sit in or last spawned. **Workshop** opens dps-EVM (liveries, extras, mods, repairs) on that vehicle.
 - Keyboard: type to search, `↑` `↓` move, `Enter` spawn, `Shift+Enter` spawn beside, `C` copy card,
   `F` favorite, `Esc` close.
 

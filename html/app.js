@@ -148,6 +148,7 @@
   $('b-card').addEventListener('click', copyCard);
   $('b-handling').addEventListener('click', copyHandling);
   $('b-fav').addEventListener('click', toggleFav);
+  $('b-workshop').addEventListener('click', () => { const model = state.cardModel; if (!model) return; post('workshop', { model }).then((r) => { if (!r.ok) toast(r.reason || 'Workshop unavailable', true); }); });
   $('b-delete').addEventListener('click', () => post('delete').then((r) => toast(r.ok ? 'Removed' : (r.reason || 'Nothing to remove'), !r.ok)));
 
   document.addEventListener('keydown', (e) => {
