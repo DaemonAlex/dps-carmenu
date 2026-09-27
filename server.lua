@@ -5,20 +5,20 @@
     vehicle the player sits in first (Damon 2026-09-27: "remove anything" on this box).
 ]]
 
-local STATE_FILE = '/opt/fivem/tools/state/vehicles_found.json'
+-- data/fleet_state.json is a copy of /opt/fivem/tools/state/vehicles_found.json that
+-- registry-refresh.sh drops here before every start (the server runtime cannot read
+-- files outside the resource tree). model -> streaming resource, game class.
 local PACKS, CLASSES = {}, {}
 
--- Read the fleet state file the registry builder writes each boot: model -> streaming resource, game class.
 CreateThread(function()
-    local fh = io.open(STATE_FILE, 'r')
-    if not fh then
-        print(('[dps-carmenu] no fleet state file at %s; packs show as vanilla'):format(STATE_FILE))
+    local raw = LoadResourceFile(GetCurrentResourceName(), 'data/fleet_state.json')
+    if not raw then
+        print('[dps-carmenu] no data/fleet_state.json (registry-refresh.sh copies it at start); packs show as vanilla')
         return
     end
-    local raw = fh:read('*a'); fh:close()
     local ok, data = pcall(json.decode, raw)
     if not ok or type(data) ~= 'table' then
-        print('[dps-carmenu] fleet state file unreadable; packs show as vanilla')
+        print('[dps-carmenu] data/fleet_state.json unreadable; packs show as vanilla')
         return
     end
     local n = 0

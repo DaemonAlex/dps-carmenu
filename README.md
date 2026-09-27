@@ -42,7 +42,7 @@ re-checks the ace server-side, so a modified client cannot spawn through this re
 - [ox_lib](https://github.com/CommunityOx/ox_lib)
 - [qbx_core](https://github.com/Qbox-project/qbx_core)
 - wasabi_carlock — optional; keys are skipped if not started
-- `/opt/fivem/tools/state/vehicles_found.json` — optional; without it every pack shows as `vanilla`
+- `data/fleet_state.json` — optional; a copy of the fleet state file that `registry-refresh.sh` drops in before every start. Without it every pack shows as `vanilla`
 
 ## Files
 
