@@ -1,47 +1,62 @@
 # dps-carmenu
 
-Admin vehicle browser and spawner for the DPSRP (Qbox) server. `/carmenu` opens an ox_lib
-context menu of every vehicle in the live `qbx_core` vehicle registry, grouped by category,
-and spawns the selected vehicle server-side — the same path `/car` uses.
+The DPS fleet browser for the Del Perro Sands (Qbox) server. `F7` or `/carmenu` opens a
+panel over the live `qbx_core` vehicle registry: search it, read what a car actually is,
+spawn it in place of the one you sit in (or beside it), and copy a clean text card to paste
+into an LLM.
 
-Because the menu reads the registry live, curation edits to the vehicle list show up on the
-next server restart with no changes to this resource.
+Because it reads the registry live, curation edits to the vehicle list show up on the next
+server restart with no changes to this resource.
 
-## Features
+## What it does
 
-- Category browser (race, super, sports, … trains, cycles) built from `qbx_core:GetVehiclesByName()`
-- Server-side spawn through `qbx.spawnVehicle` with warp-in
-- Admin-gated: the `/carmenu` command is `group.admin`, and the spawn callback re-checks
-  ace permission server-side so a modified client cannot spawn through it
-- Gives the spawner keys via `wasabi_carlock` when that resource is running (optional)
+- **Search** across name, brand, model code, category and pack, with tokens:
+  `cat:sports` `pack:dpsveh-race` `type:bike` `brand:pegassi` `price:<50000` `speed:>200`
+  `sort:price-desc` (sort by `name`, `price`, `speed`, `category`, `model`).
+- **Rail** of categories with counts; **Recent** (last 15 spawned) and **Favorites** (per player, KVP).
+- **Info** in layers: registry (name, brand, category, price, type), source pack and game class
+  (from the fleet state file the registry builder writes each boot), model facts read from the
+  game (top speed, acceleration, braking, traction, seats, size), and the handling numbers once
+  the vehicle exists (spawned, or the one you sit in).
+- **Spawn** replaces the vehicle you are in (same spot and heading, you stay in the seat, keys via
+  wasabi_carlock when present) or, with **Spawn beside** / `Shift+Enter`, puts it next to you.
+- **Copy card** puts a plain-text `DPS VEHICLE CARD` on the clipboard; **Copy handling** copies every
+  handling field in `handling.meta` order. **Remove mine** deletes the vehicle you sit in or last spawned. **Workshop** opens dps-EVM (liveries, extras, mods, repairs) on that vehicle.
+- Keyboard: type to search, `↑` `↓` move, `Enter` spawn, `Shift+Enter` spawn beside, `C` copy card,
+  `F` favorite, `Esc` close.
+
+## Access
+
+The ace `dps.carmenu`. In `server.cfg`:
+
+```cfg
+add_ace group.admin dps.carmenu allow
+add_ace group.tester dps.carmenu allow
+```
+
+Give a player the tester group with qbx_core's `/addpermission <id> tester`. Every callback
+re-checks the ace server-side, so a modified client cannot spawn through this resource.
 
 ## Dependencies
 
 - [ox_lib](https://github.com/CommunityOx/ox_lib)
 - [qbx_core](https://github.com/Qbox-project/qbx_core)
 - wasabi_carlock — optional; keys are skipped if not started
-
-## Install
-
-1. Place the resource in your resources folder, e.g. `resources/[dps]/dps-carmenu`.
-2. Ensure it loads **after** `ox_lib` and `qbx_core` in your `server.cfg`:
-
-   ```cfg
-   ensure ox_lib
-   ensure qbx_core
-   ensure dps-carmenu
-   ```
-
-3. No config file and no database — there is nothing else to set up.
-
-## Usage
-
-- `/carmenu` (admin only) → pick a category → pick a vehicle → it spawns on you with keys.
+- `data/fleet_state.json` — optional; a copy of the fleet state file that `registry-refresh.sh` drops in before every start. Without it every pack shows as `vanilla`
 
 ## Files
 
 | File | Purpose |
 | --- | --- |
-| `client.lua` | Builds the category/vehicle menus and requests spawns |
-| `server.lua` | `/carmenu` command + ace-checked spawn callback |
-| `fxmanifest.lua` | Manifest (cerulean, gta5) |
+| `client.lua` | Opens the panel, feeds it the registry, reads model and handling natives, spawns through callbacks, keeps Recent and Favorites in KVP |
+| `server.lua` | Ace-checked callbacks: open, spawn (replace / beside), delete; loads the fleet state file once |
+| `shared/search.lua` | Pure Lua search (parse, match, sort, counts) and card formatters |
+| `shared/fields.lua` | Handling field list (same as dps-handlingdump) |
+| `html/` | The panel: `index.html`, `style.css` (DPS in-game tokens), `app.js` |
+| `tests/` | `lua5.4 tests/run.lua` runs every `tests/test_*.lua` with no natives |
+
+## Tests
+
+```sh
+lua5.4 tests/run.lua
+```

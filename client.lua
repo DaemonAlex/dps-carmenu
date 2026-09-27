@@ -1,85 +1,289 @@
 --[[
-    dps-carmenu client
-    Category browser -> vehicle list -> spawn (keys included).
-    Registry comes live from qbx_core, so curation edits show up
-    on the next restart with no changes here.
+    dps-carmenu client  (Qbox native: qbx registry export, ox_lib cache, lib.callback)
+    F7 or /carmenu opens the fleet panel: a floating search bar with the grouped list
+    under it. Search, grouping and card text are Lua (shared/search.lua) so the panel
+    is a view and the logic stays testable.
+
+    Performance: no CreateThread loops. Everything is event or callback driven; the
+    only deferred work is a one-shot timer after a spawn. Model natives run only after
+    a selection rests (the panel debounces) and the model is released right after.
 ]]
 
-local CATEGORY_ORDER = {
-    'race', 'super', 'sports', 'sportsclassics', 'muscle', 'sedans', 'coupes',
-    'compacts', 'suvs', 'pickups', 'offroad', 'motorcycles', 'vans', 'trailers', 'boats',
-    'helicopters', 'planes', 'openwheel', 'emergency', 'military', 'service',
-    'commercial', 'industrial', 'utility', 'rc', 'trains', 'cycles',
-}
+local isOpen = false
+local ALL = {}            -- rows: model, name, brand, category, type, price, pack, cls, make, dept, kind, photo, speed, seats
+local BY_MODEL = {}
+local INFO = {}           -- model -> model-native info, read once per session
+local HANDLING = {}       -- model -> last handling record read from a live vehicle
+local lastSpawned = nil   -- { netId, model }
+local serverData = nil    -- packs / classes / emergency / photos from the server, once per session
 
-local function spawnVehicle(model, label)
-    local ok, plate = lib.callback.await('dps-carmenu:server:spawn', false, model)
+local KVP_RECENT, KVP_FAV = 'dps_carmenu_recent', 'dps_carmenu_fav'
+local RECENT_MAX = 15
+
+-- ── small helpers ──────────────────────────────────────────────────────────────
+
+local function loadList(key)
+    local raw = GetResourceKvpString(key)
+    if not raw then return {} end
+    local ok, t = pcall(json.decode, raw)
+    if not ok or type(t) ~= 'table' then return {} end
+    return t
+end
+
+local function saveList(key, t) SetResourceKvp(key, json.encode(t)) end
+
+local function pushRecent(model)
+    local list = loadList(KVP_RECENT)
+    for i = #list, 1, -1 do if list[i] == model then table.remove(list, i) end end
+    table.insert(list, 1, model)
+    while #list > RECENT_MAX do table.remove(list) end
+    saveList(KVP_RECENT, list)
+    return list
+end
+
+local function favList() return loadList(KVP_FAV) end
+local function isFav(model)
+    for _, m in ipairs(favList()) do if m == model then return true end end
+    return false
+end
+
+local function notify(description, kind)
+    lib.notify({ title = 'DPS Fleet', description = description, type = kind or 'inform' })
+end
+
+local CLASS_NAMES = { [0] = 'Compacts', 'Sedans', 'SUVs', 'Coupes', 'Muscle', 'Sports Classics', 'Sports', 'Super', 'Motorcycles', 'Off-road',
+    'Industrial', 'Utility', 'Vans', 'Cycles', 'Boats', 'Helicopters', 'Planes', 'Service', 'Emergency', 'Military', 'Commercial', 'Trains', 'Open Wheel' }
+
+-- ── vehicle facts ──────────────────────────────────────────────────────────────
+
+---Model-level facts. Streams the model briefly the first time; cached for the session.
+local function readModelInfo(model)
+    if INFO[model] then return INFO[model] end
+    local hash = joaat(model)
+    if not IsModelInCdimage(hash) or not IsModelAVehicle(hash) then
+        INFO[model] = { missing = true }
+        return INFO[model]
+    end
+    local loaded = pcall(lib.requestModel, hash, 4000)
+    local min, max = GetModelDimensions(hash)
+    local info = {
+        speed = math.floor(GetVehicleModelMaxSpeed(hash) * 3.6 + 0.5),
+        accel = GetVehicleModelAcceleration(hash),
+        brake = GetVehicleModelMaxBraking(hash),
+        traction = GetVehicleModelMaxTraction(hash),
+        seats = GetVehicleModelNumberOfSeats(hash),
+        cls = CLASS_NAMES[GetVehicleClassFromName(hash)] or '-',
+        make = GetMakeNameFromVehicleModel(hash),
+        dims = { l = max.y - min.y, w = max.x - min.x, h = max.z - min.z },
+    }
+    if loaded then SetModelAsNoLongerNeeded(hash) end
+    INFO[model] = info
+    local row = BY_MODEL[model]
+    if row then
+        row.speed, row.seats = info.speed, info.seats
+        if info.cls ~= '-' then row.cls = info.cls end
+    end
+    return info
+end
+
+---A live vehicle of this model: the one we sit in (ox_lib cache), else the last one we spawned.
+local function liveVehicle(model)
+    local hash = joaat(model)
+    local veh = cache.vehicle
+    if veh and veh ~= 0 and GetEntityModel(veh) == hash then return veh end
+    if not lastSpawned or lastSpawned.model ~= model then return nil end
+    if not NetworkDoesNetworkIdExist(lastSpawned.netId) then return nil end
+    local e = NetworkGetEntityFromNetworkId(lastSpawned.netId)
+    if e == 0 or not DoesEntityExist(e) then return nil end
+    return e
+end
+
+local function readHandling(model)
+    local veh = liveVehicle(model)
+    if not veh then return HANDLING[model] end
+    local rec = {}
+    for _, f in ipairs(HandlingFields.floats) do rec[f] = GetVehicleHandlingFloat(veh, 'CHandlingData', f) end
+    for _, f in ipairs(HandlingFields.ints) do rec[f] = GetVehicleHandlingInt(veh, 'CHandlingData', f) end
+    for _, f in ipairs(HandlingFields.vectors) do
+        local v = GetVehicleHandlingVector(veh, 'CHandlingData', f)
+        rec[f] = { x = v.x, y = v.y, z = v.z }
+    end
+    HANDLING[model] = rec
+    return rec
+end
+
+local function cardInfo(model)
+    local row = BY_MODEL[model]
+    if not row then return nil end
+    local out = {}
+    for k, v in pairs(row) do out[k] = v end
+    for k, v in pairs(readModelInfo(model)) do out[k] = v end
+    out.handling = readHandling(model)
+    return out
+end
+
+-- ── rows ───────────────────────────────────────────────────────────────────────
+
+local function buildRows(data)
+    ALL, BY_MODEL = {}, {}
+    local packs, classes, emergency, photos = data.packs or {}, data.classes or {}, data.emergency or {}, data.photos or {}
+    local registry = exports.qbx_core:GetVehiclesByName()
+    if type(registry) ~= 'table' then return end
+    for model, v in pairs(registry) do
+        local em = emergency[model]
+        local row = {
+            model = model, name = v.name or model, brand = v.brand or '', category = v.category or 'other',
+            type = v.type or '-', price = tonumber(v.price) or 0, pack = packs[model] or 'vanilla', cls = classes[model] or '-', make = '',
+            photo = photos[model],
+        }
+        if row.category == 'emergency' then
+            row.dept = em and em.dept or 'none'
+            row.kind = em and em.kind or 'Other'
+        end
+        ALL[#ALL + 1] = row
+        BY_MODEL[model] = row
+    end
+end
+
+-- ── open / close ───────────────────────────────────────────────────────────────
+
+local function closePanel()
+    if not isOpen then return end
+    isOpen = false
+    SetNuiFocus(false, false)
+    SendNUIMessage({ action = 'close' })
+end
+
+local function openPanel()
+    if isOpen then return end
+    -- Static tables travel once per session; later opens only re-check access.
+    local ok, data = lib.callback.await('dps-carmenu:server:open', false, serverData ~= nil)
     if not ok then
-        lib.notify({ title = 'Car Menu', description = ('Failed to spawn %s'):format(model), type = 'error' })
+        notify('You do not have access to the fleet browser.', 'error')
         return
     end
+    if data then serverData = data end
+    if not serverData then serverData = {} end
+    buildRows(serverData)
+    if #ALL == 0 then
+        notify('The vehicle registry is empty; nothing to show.', 'error')
+        return
+    end
+    isOpen = true
+    SetNuiFocus(true, true)
+    SendNUIMessage({
+        action = 'open',
+        vehicles = ALL,
+        total = #ALL,
+        recent = loadList(KVP_RECENT),
+        favorites = favList(),
+        deptNames = Groups.DEPT_NAME,
+        deptCodes = Groups.DEPT_CODE,
+        categoryLabels = Groups.CATEGORY_LABEL,
+    })
+end
+
+RegisterCommand('carmenu', function()
+    if isOpen then closePanel() else openPanel() end
+end, false)
+RegisterKeyMapping('carmenu', 'DPS Fleet: open the vehicle browser', 'keyboard', 'F7')
+TriggerEvent('chat:addSuggestion', '/carmenu', 'Open the DPS fleet browser (admins and testers)')
+
+-- ── NUI callbacks ──────────────────────────────────────────────────────────────
+
+RegisterNUICallback('close', function(_, cb)
+    closePanel()
+    cb({ ok = true })
+end)
+
+RegisterNUICallback('sections', function(req, cb)
+    if type(req) ~= 'table' then cb({ sections = {} }) return end
+    local sections = Search.sections(ALL, req.q, { chip = req.chip or 'all', recent = loadList(KVP_RECENT), favorites = favList() })
+    cb({ sections = sections })
+end)
+
+RegisterNUICallback('info', function(req, cb)
+    local model = type(req) == 'table' and req.model or nil
+    if not model or not BY_MODEL[model] then cb({ ok = false }) return end
+    cb({ ok = true, info = readModelInfo(model), handling = readHandling(model), row = BY_MODEL[model], favorite = isFav(model) })
+end)
+
+RegisterNUICallback('spawn', function(req, cb)
+    local model = type(req) == 'table' and req.model or nil
+    if not model or not BY_MODEL[model] then cb({ ok = false, reason = 'Unknown vehicle.' }) return end
+    local mode = req.mode == 'beside' and 'beside' or 'replace'
+    local beside
+    if mode == 'beside' then
+        local base = cache.vehicle or cache.ped
+        local len = 5.0
+        if cache.vehicle then
+            local min, max = GetModelDimensions(GetEntityModel(cache.vehicle))
+            len = (max.x - min.x) + 3.0
+        end
+        local p = GetOffsetFromEntityInWorldCoords(base, len, 0.0, 0.0)
+        beside = { x = p.x, y = p.y, z = p.z, w = GetEntityHeading(base) }
+    end
+    local ok, plate, netId = lib.callback.await('dps-carmenu:server:spawn', false, model, mode, beside)
+    if not ok then
+        cb({ ok = false, reason = plate or 'Spawn failed.' })
+        return
+    end
+    lastSpawned = { netId = netId, model = model }
     if plate and GetResourceState('wasabi_carlock') == 'started' then
-        exports.wasabi_carlock:GiveKey(plate)
+        pcall(function() exports.wasabi_carlock:GiveKey(plate) end)
     end
-    lib.notify({ title = 'Car Menu', description = ('%s spawned'):format(label or model), type = 'success' })
-end
+    local recent = pushRecent(model)
+    -- the vehicle exists now: read its handling once it has settled
+    SetTimeout(250, function() readHandling(model) end)
+    cb({ ok = true, plate = plate, recent = recent })
+end)
 
-local function openCategory(cat, vehicles)
-    table.sort(vehicles, function(a, b) return (a.brand .. a.name) < (b.brand .. b.name) end)
-    local options = {}
-    for _, v in ipairs(vehicles) do
-        options[#options + 1] = {
-            title = (v.brand and v.brand ~= '' and (v.brand .. ' ') or '') .. v.name,
-            description = v.model,
-            arrow = false,
-            onSelect = function() spawnVehicle(v.model, v.name) end,
-        }
-    end
-    lib.registerContext({
-        id = 'dps_carmenu_' .. cat,
-        title = ('%s (%d)'):format(cat:upper(), #vehicles),
-        menu = 'dps_carmenu_main',
-        options = options,
-    })
-    lib.showContext('dps_carmenu_' .. cat)
-end
+RegisterNUICallback('favorite', function(req, cb)
+    local model = type(req) == 'table' and req.model or nil
+    if not model or not BY_MODEL[model] then cb({ ok = false }) return end
+    local list = favList()
+    local found
+    for i, m in ipairs(list) do if m == model then found = i end end
+    if found then table.remove(list, found) else table.insert(list, 1, model) end
+    saveList(KVP_FAV, list)
+    cb({ ok = true, favorites = list, on = found == nil })
+end)
 
-RegisterNetEvent('dps-carmenu:client:open', function()
-    local byCat = {}
-    for model, v in pairs(exports.qbx_core:GetVehiclesByName() or {}) do
-        local cat = v.category or 'sports'
-        byCat[cat] = byCat[cat] or {}
-        byCat[cat][#byCat[cat] + 1] = {
-            model = model, name = v.name or model, brand = v.brand or '',
-        }
-    end
+RegisterNUICallback('card', function(req, cb)
+    local info = cardInfo(type(req) == 'table' and req.model or nil)
+    if not info then cb({ ok = false, reason = 'Unknown vehicle.' }) return end
+    cb({ ok = true, text = Card.format(info) })
+end)
 
-    local options = {}
-    for _, cat in ipairs(CATEGORY_ORDER) do
-        local list = byCat[cat]
-        if list and #list > 0 then
-            options[#options + 1] = {
-                title = ('%s (%d)'):format(cat:upper(), #list),
-                onSelect = function() openCategory(cat, list) end,
-            }
-        end
-    end
-    -- anything in a category not in the fixed order still shows up
-    for cat, list in pairs(byCat) do
-        local known = false
-        for _, c in ipairs(CATEGORY_ORDER) do if c == cat then known = true break end end
-        if not known and #list > 0 then
-            options[#options + 1] = {
-                title = ('%s (%d)'):format(cat:upper(), #list),
-                onSelect = function() openCategory(cat, list) end,
-            }
-        end
-    end
+RegisterNUICallback('handlingText', function(req, cb)
+    local model = type(req) == 'table' and req.model or nil
+    if not model then cb({ ok = false, reason = 'Unknown vehicle.' }) return end
+    local rec = readHandling(model)
+    if not rec then cb({ ok = false, reason = 'Spawn it or sit in it first.' }) return end
+    cb({ ok = true, text = Card.handling(rec, HandlingFields, model) })
+end)
 
-    lib.registerContext({
-        id = 'dps_carmenu_main',
-        title = 'Vehicle Browser',
-        options = options,
-    })
-    lib.showContext('dps_carmenu_main')
+RegisterNUICallback('delete', function(_, cb)
+    local veh = cache.vehicle
+    if (not veh or veh == 0) and lastSpawned and NetworkDoesNetworkIdExist(lastSpawned.netId) then
+        veh = NetworkGetEntityFromNetworkId(lastSpawned.netId)
+    end
+    if not veh or veh == 0 or not DoesEntityExist(veh) then cb({ ok = false, reason = 'Nothing to remove.' }) return end
+    local ok = lib.callback.await('dps-carmenu:server:delete', false, NetworkGetNetworkIdFromEntity(veh))
+    cb({ ok = ok == true, reason = ok and nil or 'Could not remove it.' })
+end)
+
+-- Workshop: hand the selected vehicle (the one we sit in, else the last spawned) to dps-EVM.
+RegisterNUICallback('workshop', function(req, cb)
+    local model = type(req) == 'table' and req.model or nil
+    local veh = model and liveVehicle(model) or nil
+    if not veh then cb({ ok = false, reason = 'Spawn it or sit in it first.' }) return end
+    if GetResourceState('dps-EVM') ~= 'started' then cb({ ok = false, reason = 'Workshop (dps-EVM) is not running.' }) return end
+    closePanel()
+    TriggerEvent('vehiclemods:client:openVehicleModMenu', veh)
+    cb({ ok = true })
+end)
+
+AddEventHandler('onResourceStop', function(res)
+    if res == GetCurrentResourceName() then SetNuiFocus(false, false) end
 end)
